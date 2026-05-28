@@ -27,22 +27,61 @@ const isAdmin = (u) => hasRole(u, "Admin");
 const isGA = (u) => hasRole(u, "GA");
 const isApprover = (u) => hasRole(u, "Approver");
 const isAdminOrGA = (u) => isAdmin(u) || isGA(u);
-const isAdminOrApprover = (u) => isAdmin(u) || isApprover(u);
 
 // ─── STATUS BADGE ─────────────────────────────────────────────────────────────
 const STATUS_COLORS = {
+  // Vehicle
   Available: "#22c55e", "In Use": "#f59e0b", Maintenance: "#ef4444", Retired: "#6b7280",
-  Pending: "#f59e0b", Approved: "#22c55e", Rejected: "#ef4444",
-  Completed: "#3b82f6", Cancelled: "#6b7280", Active: "#22c55e",
+  // Request
+  submitted: "#f59e0b",
+  pending: "#f59e0b",
+  approved_department: "#3b82f6",
+  approved_hrd_ga: "#0ea5e9",
+  fully_approved: "#22c55e",
+  waiting_driver: "#f59e0b",
+  driver_assigned: "#8b5cf6",
+  on_going: "#f97316",
+  rejected: "#ef4444",
+  cancelled: "#6b7280",
+  completed: "#10b981",
+  // Assignment
+  pending_driver: "#f59e0b",
+  accepted: "#22c55e",
+  rejected_driver: "#ef4444",
+  // Priority
+  normal: "#6b7280",
+  urgent: "#f59e0b",
+  critical: "#ef4444",
+};
+
+const STATUS_LABELS = {
+  submitted: "Menunggu Dept Head",
+  pending: "Menunggu Dept Head",
+  approved_department: "Menunggu HRD",
+  approved_hrd_ga: "Disetujui HRD",
+  fully_approved: "Fully Approved",
+  waiting_driver: "Menunggu Driver",
+  driver_assigned: "Driver Ditugaskan",
+  on_going: "Sedang Berjalan",
+  rejected: "Ditolak",
+  cancelled: "Dibatalkan",
+  completed: "Selesai",
+  pending_driver: "Menunggu Driver",
+  accepted: "Driver Menerima",
+  // Priority labels
+  normal: "Normal",
+  urgent: "Urgent",
+  critical: "Critical",
 };
 function Badge({ label }) {
   const color = STATUS_COLORS[label] || "#6b7280";
+  const display = STATUS_LABELS[label] || label;
   return (
     <span style={{
       background: color + "22", color, border: `1px solid ${color}55`,
       padding: "2px 10px", borderRadius: 99, fontSize: 12, fontWeight: 600,
       letterSpacing: "0.03em", whiteSpace: "nowrap",
-    }}>{label}</span>
+    }}>{display}</span>
   );
 }
 
@@ -318,10 +357,12 @@ function Dashboard() {
           totalVehicles: vehicles.length,
           availableVehicles: vehicles.filter((v) => v.status === "Available").length,
           inUseVehicles: vehicles.filter((v) => v.status === "In Use").length,
-          pendingRequests: requests.filter((r) => r.status === "Pending").length,
+          pendingRequests: requests.filter((r) => ["pending", "approved_department"].includes(r.status)).length,
           myRequests: requests.length,
         });
-      } catch {}
+      } catch (e) {
+        console.error(e);
+      }
     }
     load();
   }, [token]);
@@ -377,10 +418,16 @@ function VehiclesPage() {
       const res = await api("GET", `/vehicles?${params}`, null, token);
       setVehicles(res.data || []);
       setPagination(res.pagination);
-    } catch (e) { toast("Gagal memuat kendaraan", "error"); }
+    } catch { toast("Gagal memuat kendaraan", "error"); }
   }, [token, search, statusFilter, toast]);
 
-  useEffect(() => { load(page); }, [load, page]);
+  useEffect(() => {
+    let active = true;
+    Promise.resolve().then(() => {
+      if (active) load(page);
+    });
+    return () => { active = false; };
+  }, [load, page]);
 
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
@@ -506,7 +553,6 @@ function RequestsPage() {
   const [statusFilter, setStatusFilter] = useState("");
   const [page, setPage] = useState(1);
   const [modal, setModal] = useState(null);
-  const [vehicles, setVehicles] = useState([]);
   const [form, setForm] = useState({});
   const [rejectNotes, setRejectNotes] = useState("");
   const [loading, setLoading] = useState(false);
@@ -522,11 +568,12 @@ function RequestsPage() {
   }, [token, statusFilter, toast]);
 
   useEffect(() => {
-    load(page);
-    api("GET", "/vehicles?per_page=100&status=Available", null, token)
-      .then((r) => setVehicles(r.data || []))
-      .catch(() => {});
-  }, [load, page, token]);
+    let active = true;
+    Promise.resolve().then(() => {
+      if (active) load(page);
+    });
+    return () => { active = false; };
+  }, [load, page]);
 
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
@@ -541,9 +588,19 @@ function RequestsPage() {
     } finally { setLoading(false); }
   }
 
-  async function approve(id) {
+  // Determine which approval role the current user should act as
+  function getApprovalRole(request) {
+    const status = typeof request.status === 'object' ? request.status?.value || request.status : request.status;
+    if ((status === "submitted" || status === "pending") && (isAdmin(user) || isApprover(user))) return "dept_head";
+    if (status === "approved_department" && (isAdmin(user) || isGA(user))) return "hrd_head";
+    return null;
+  }
+
+  async function approve(req) {
+    const role = getApprovalRole(req);
+    if (!role) return;
     try {
-      await api("POST", `/requests/${id}/approve`, null, token);
+      await api("POST", `/requests/${req.id}/approve`, { role, notes: "" }, token);
       toast("Permintaan disetujui");
       load(page);
     } catch (e) { toast(e.data?.message || "Gagal", "error"); }
@@ -558,28 +615,53 @@ function RequestsPage() {
     } catch (e) { toast(e.data?.message || "Gagal", "error"); }
   }
 
+  async function startTrip(reqId) {
+    try {
+      await api("POST", `/requests/${reqId}/start`, null, token);
+      toast("Perjalanan telah dimulai!");
+      load(page);
+      setModal(null);
+    } catch (e) {
+      toast(e.data?.message || "Gagal memulai perjalanan", "error");
+    }
+  }
+
+  async function completeTrip(reqId) {
+    try {
+      await api("POST", `/requests/${reqId}/complete`, null, token);
+      toast("Perjalanan telah selesai!");
+      load(page);
+      setModal(null);
+    } catch (e) {
+      toast(e.data?.message || "Gagal menyelesaikan perjalanan", "error");
+    }
+  }
+
   const cols = [
-    { key: "purpose", label: "Tujuan", render: (r) => <span style={{ fontWeight: 500 }}>{r.purpose}</span> },
+    { key: "purpose", label: "Keperluan", render: (r) => <span style={{ fontWeight: 500 }}>{r.purpose}</span> },
     { key: "requested_by", label: "Pemohon", render: (r) => r.requested_by?.name || "—" },
-    { key: "vehicle", label: "Kendaraan", render: (r) => r.vehicle ? `${r.vehicle.name} (${r.vehicle.plate_number})` : "—" },
-    { key: "start_time", label: "Mulai", render: (r) => r.start_time ? new Date(r.start_time).toLocaleDateString("id-ID") : "—" },
+    { key: "destination_city", label: "Kota Tujuan", render: (r) => r.destination_city || "—" },
+    { key: "start_time", label: "Berangkat", render: (r) => r.start_time ? new Date(r.start_time).toLocaleDateString("id-ID") : "—" },
     { key: "status", label: "Status", render: (r) => <Badge label={r.status} /> },
     {
       key: "actions", label: "Aksi",
-      render: (r) => (
-        <div style={{ display: "flex", gap: 6 }}>
-          <Btn variant="ghost" style={{ padding: "5px 12px", fontSize: 12 }}
-            onClick={(e) => { e.stopPropagation(); setModal({ mode: "view", data: r }); }}>Detail</Btn>
-          {isAdminOrApprover(user) && r.status === "Pending" && (
-            <>
-              <Btn variant="success" style={{ padding: "5px 12px", fontSize: 12 }}
-                onClick={(e) => { e.stopPropagation(); approve(r.id); }}>Setuju</Btn>
-              <Btn variant="danger" style={{ padding: "5px 12px", fontSize: 12 }}
-                onClick={(e) => { e.stopPropagation(); setRejectNotes(""); setModal({ mode: "reject", data: r }); }}>Tolak</Btn>
-            </>
-          )}
-        </div>
-      ),
+      render: (r) => {
+        const approvalRole = getApprovalRole(r);
+        return (
+          <div style={{ display: "flex", gap: 6 }}>
+            <Btn variant="ghost" style={{ padding: "5px 12px", fontSize: 12 }}
+              onClick={(e) => { e.stopPropagation(); setModal({ mode: "view", data: r }); }}>Detail</Btn>
+            {approvalRole && (
+              <>
+                <Btn variant="success" style={{ padding: "5px 12px", fontSize: 12 }}
+                  onClick={(e) => { e.stopPropagation(); approve(r); }}>Setuju</Btn>
+                <Btn variant="danger" style={{ padding: "5px 12px", fontSize: 12 }}
+                  onClick={(e) => { e.stopPropagation(); setRejectNotes(""); setModal({ mode: "reject", data: r }); }}>Tolak</Btn>
+              </>
+            )}
+          </div>
+        );
+      },
     },
   ];
 
@@ -592,9 +674,16 @@ function RequestsPage() {
     >
       <Card style={{ marginBottom: 16 }}>
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
-          <Select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} style={{ ...inputStyle, width: 180 }}>
+          <Select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} style={{ ...inputStyle, width: 200 }}>
             <option value="">Semua Status</option>
-            {["Pending", "Approved", "Rejected", "Completed", "Cancelled"].map((s) => <option key={s}>{s}</option>)}
+            <option value="submitted">Menunggu Dept Head</option>
+            <option value="approved_department">Menunggu HRD</option>
+            <option value="approved_hrd_ga">Disetujui HRD Head</option>
+            <option value="waiting_driver">Menunggu Driver</option>
+            <option value="driver_assigned">Driver Ditugaskan</option>
+            <option value="on_going">Sedang Berjalan</option>
+            <option value="rejected">Ditolak</option>
+            <option value="completed">Selesai</option>
           </Select>
           <Btn variant="ghost" onClick={() => load(1)}>Filter</Btn>
         </div>
@@ -607,22 +696,51 @@ function RequestsPage() {
 
       {modal?.mode === "create" && (
         <Modal title="Buat Permintaan Kendaraan" onClose={() => setModal(null)}>
-          <Field label="Tujuan / Keperluan">
-            <Textarea value={form.purpose || ""} onChange={set("purpose")} placeholder="Perjalanan dinas ke klien..." />
-          </Field>
-          <Field label="Kendaraan (opsional)">
-            <Select value={form.vehicle_id || ""} onChange={set("vehicle_id")}>
-              <option value="">-- Pilih Kendaraan --</option>
-              {vehicles.map((v) => <option key={v.id} value={v.id}>{v.name} - {v.plate_number}</option>)}
+          <Field label="Departemen">
+            <Select value={form.department_id || ""} onChange={set("department_id")}>
+              <option value="">-- Pilih Departemen --</option>
+              <option value="IT">IT</option>
+              <option value="FA">FA</option>
+              <option value="HR&GA">HRD &amp; GA</option>
+              <option value="PRODUCTION">Produksi</option>
+              <option value="QC">QC</option>
+              <option value="QA">QA</option>
             </Select>
           </Field>
+          <Field label="Kota Tujuan">
+            <Input value={form.destination_city || ""} onChange={set("destination_city")} placeholder="Contoh: Jakarta" />
+          </Field>
+          <Field label="Tempat Tujuan">
+            <Input value={form.destination_place || ""} onChange={set("destination_place")} placeholder="Contoh: Kantor Pusat Sudirman" />
+          </Field>
+          <Field label="Keperluan / Agenda">
+            <Textarea value={form.purpose || ""} onChange={set("purpose")} placeholder="Meting dengan klien..." />
+          </Field>
+          
+          <div style={{ display: "flex", gap: 12 }}>
+            <div style={{ flex: 1 }}>
+              <Field label="Jml Penumpang">
+                <Input type="number" value={form.passenger_count || ""} onChange={set("passenger_count")} placeholder="1" />
+              </Field>
+            </div>
+            <div style={{ flex: 1 }}>
+              <Field label="Prioritas">
+                <Select value={form.priority || "normal"} onChange={set("priority")}>
+                  <option value="normal">Normal</option>
+                  <option value="urgent">Urgent</option>
+                  <option value="critical">Critical</option>
+                </Select>
+              </Field>
+            </div>
+          </div>
+
           <Field label="Waktu Mulai">
             <Input type="datetime-local" value={form.start_time || ""} onChange={set("start_time")} />
           </Field>
-          <Field label="Waktu Selesai">
+          <Field label="Waktu Selesai (Opsional)">
             <Input type="datetime-local" value={form.end_time || ""} onChange={set("end_time")} />
           </Field>
-          <Field label="Catatan">
+          <Field label="Catatan Tambahan">
             <Textarea value={form.notes || ""} onChange={set("notes")} placeholder="Informasi tambahan..." />
           </Field>
           <Btn onClick={create} disabled={loading} style={{ width: "100%", marginTop: 8 }}>
@@ -636,22 +754,98 @@ function RequestsPage() {
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             {[
               ["Pemohon", modal.data.requested_by?.name],
-              ["Tujuan", modal.data.purpose],
-              ["Kendaraan", modal.data.vehicle ? `${modal.data.vehicle.name} (${modal.data.vehicle.plate_number})` : "—"],
-              ["Waktu Mulai", modal.data.start_time ? new Date(modal.data.start_time).toLocaleString("id-ID") : "—"],
+              ["Departemen", modal.data.department_id || "—"],
+              ["Kota Tujuan", modal.data.destination_city || "—"],
+              ["Tempat Tujuan", modal.data.destination_place || "—"],
+              ["Keperluan", modal.data.purpose],
+              ["Jumlah Penumpang", modal.data.passenger_count ? `${modal.data.passenger_count} orang` : "—"],
+              ["Prioritas", modal.data.priority],
+              ["Waktu Berangkat", modal.data.start_time ? new Date(modal.data.start_time).toLocaleString("id-ID") : "—"],
               ["Waktu Selesai", modal.data.end_time ? new Date(modal.data.end_time).toLocaleString("id-ID") : "—"],
               ["Status", modal.data.status],
-              ["Disetujui Oleh", modal.data.approved_by?.name || "—"],
               ["Catatan", modal.data.notes || "—"],
             ].map(([k, v]) => (
               <div key={k} style={{ display: "flex", justifyContent: "space-between", borderBottom: "1px solid var(--border)", paddingBottom: 8, gap: 12 }}>
                 <span style={{ color: "var(--muted)", fontSize: 13, flexShrink: 0 }}>{k}</span>
                 <span style={{ fontWeight: 600, color: "var(--text)", fontSize: 13, textAlign: "right" }}>
-                  {k === "Status" ? <Badge label={v} /> : v || "—"}
+                  {(k === "Status" || k === "Prioritas") ? <Badge label={v} /> : v || "—"}
                 </span>
               </div>
             ))}
           </div>
+
+          {/* Approval History */}
+          {modal.data.approvals?.length > 0 && (
+            <>
+              <div style={{ marginTop: 20, marginBottom: 8, fontWeight: 700, fontSize: 13, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.06em" }}>Riwayat Approval</div>
+              {modal.data.approvals.map((a, i) => (
+                <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: "1px solid var(--border)" }}>
+                  <div>
+                    <div style={{ fontWeight: 600, fontSize: 13 }}>{a.approver?.name || "—"}</div>
+                    <div style={{ fontSize: 11, color: "var(--muted)" }}>{a.role === "dept_head" ? "Kepala Dept" : "HRD Head"}</div>
+                    {a.notes && <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>Catatan: {a.notes}</div>}
+                  </div>
+                  <Badge label={a.status} />
+                </div>
+              ))}
+            </>
+          )}
+
+          {/* Operational Trip & Driver Assignment Info */}
+          {modal.data.operational_trip && (
+            <div style={{ marginTop: 20, padding: 16, background: "var(--hover)", borderRadius: 12, border: "1px solid var(--border)" }}>
+              <div style={{ fontWeight: 700, fontSize: 13, color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 12 }}>🚗 Informasi Kendaraan & Driver</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {[
+                  ["Nama Driver", modal.data.operational_trip.driver?.name || "—"],
+                  ["Nama Kendaraan", modal.data.operational_trip.vehicle?.name || "—"],
+                  ["Plat Nomor", modal.data.operational_trip.vehicle?.plate_number || "—"],
+                  ["Tipe Kendaraan", modal.data.operational_trip.vehicle?.type || "—"],
+                  ["Status Perjalanan", modal.data.operational_trip.status === "scheduled" ? "Terjadwal" : modal.data.operational_trip.status === "on_going" ? "Sedang Berjalan" : modal.data.operational_trip.status === "completed" ? "Selesai" : modal.data.operational_trip.status],
+                ].map(([k, v]) => (
+                  <div key={k} style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
+                    <span style={{ color: "var(--muted)" }}>{k}</span>
+                    <span style={{ fontWeight: 600, color: "var(--text)" }}>{v}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Approve/Reject buttons inside detail modal */}
+          {(() => { const role = getApprovalRole(modal.data); return role && (
+            <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
+              <Btn variant="success" style={{ flex: 1 }} onClick={() => { approve(modal.data); setModal(null); }}>✓ Setujui</Btn>
+              <Btn variant="danger" style={{ flex: 1 }} onClick={() => { setRejectNotes(""); setModal({ mode: "reject", data: modal.data }); }}>✗ Tolak</Btn>
+            </div>
+          ); })()}
+
+          {/* Driver trip start/complete buttons inside detail modal */}
+          {(() => {
+            const statusVal = typeof modal.data.status === 'object' ? modal.data.status?.value || modal.data.status : modal.data.status;
+            const isAssignedDriver = user.id === modal.data.operational_trip?.driver?.id || user.roles?.includes("Admin") || user.roles?.includes("GA");
+            if (isAssignedDriver) {
+              if (statusVal === "driver_assigned") {
+                return (
+                  <div style={{ marginTop: 20 }}>
+                    <Btn variant="primary" style={{ width: "100%", padding: "11px" }} onClick={() => startTrip(modal.data.id)}>
+                      🚗 Mulai Perjalanan
+                    </Btn>
+                  </div>
+                );
+              }
+              if (statusVal === "on_going") {
+                return (
+                  <div style={{ marginTop: 20 }}>
+                    <Btn variant="success" style={{ width: "100%", padding: "11px" }} onClick={() => completeTrip(modal.data.id)}>
+                      ✅ Selesai Perjalanan
+                    </Btn>
+                  </div>
+                );
+              }
+            }
+            return null;
+          })()}
         </Modal>
       )}
 
@@ -694,22 +888,39 @@ function AssignmentsPage() {
     } catch { toast("Gagal memuat assignment", "error"); }
   }, [token, statusFilter, toast]);
 
-  useEffect(() => { load(page); }, [load, page]);
+  useEffect(() => {
+    let active = true;
+    Promise.resolve().then(() => {
+      if (active) load(page);
+    });
+    return () => { active = false; };
+  }, [load, page]);
 
   async function openCreate() {
     try {
-      const [rRes, vRes, uRes] = await Promise.all([
-        api("GET", "/requests?status=Approved&per_page=100", null, token),
-        api("GET", "/vehicles?status=Available&per_page=100", null, token),
+      const [rRes, uRes] = await Promise.all([
+        api("GET", "/requests?status=approved_hrd_ga&per_page=100", null, token),
         api("GET", "/users?per_page=100", null, token),
       ]);
       setApprovedRequests(rRes.data || []);
-      setAvailableVehicles(vRes.data || []);
       const allUsers = uRes.data || [];
       setDrivers(allUsers.filter((u) => u.roles?.includes("Driver")));
-    } catch {}
-    setForm({ assigned_at: new Date().toISOString().slice(0, 16) });
+    } catch (e) {
+      console.error(e);
+    }
+    setForm({});
     setModal({ mode: "create" });
+  }
+
+  async function openRespond(r) {
+    try {
+      const vRes = await api("GET", "/vehicles?status=Available&per_page=100", null, token);
+      setAvailableVehicles(vRes.data || []);
+    } catch (e) {
+      console.error(e);
+    }
+    setForm({});
+    setModal({ mode: "respond", data: r });
   }
 
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
@@ -718,47 +929,56 @@ function AssignmentsPage() {
     setLoading(true);
     try {
       await api("POST", "/assignments", form, token);
-      toast("Kendaraan berhasil di-assign");
+      toast("Kendaraan berhasil di-assign ke driver");
       setModal(null); load(page);
     } catch (e) {
       toast(e.data?.message || JSON.stringify(e.data?.errors || "Error"), "error");
     } finally { setLoading(false); }
   }
 
-  async function returnVehicle(a) {
-    const returned_at = prompt("Masukkan waktu pengembalian (YYYY-MM-DDTHH:mm):", new Date().toISOString().slice(0, 16));
-    if (!returned_at) return;
+  async function respondToAssignment(resType) {
+    setLoading(true);
     try {
-      await api("PUT", `/assignments/${a.id}`, { returned_at }, token);
-      toast("Kendaraan berhasil dikembalikan");
-      load(page);
-    } catch (e) { toast(e.data?.message || "Gagal", "error"); }
+      const payload = { response: resType };
+      if (resType === 'accepted') {
+        if (!form.vehicle_id) throw { data: { message: "Pilih kendaraan jika menerima!" } };
+        payload.vehicle_id = form.vehicle_id;
+      } else {
+        if (!form.reject_reason) throw { data: { message: "Isi alasan penolakan!" } };
+        payload.reject_reason = form.reject_reason;
+      }
+      await api("PUT", `/assignments/${modal.data.id}`, payload, token);
+      toast("Respon berhasil disimpan");
+      setModal(null); load(page);
+    } catch (e) {
+      toast(e.data?.message || JSON.stringify(e.data?.errors || "Error"), "error");
+    } finally { setLoading(false); }
   }
 
   async function cancel(a) {
-    if (!confirm("Batalkan assignment ini?")) return;
+    if (!confirm("Hapus assignment ini?")) return;
     try {
-      await api("POST", `/assignments/${a.id}/cancel`, null, token);
-      toast("Assignment dibatalkan");
+      await api("DELETE", `/assignments/${a.id}`, null, token);
+      toast("Assignment dihapus");
       load(page);
     } catch (e) { toast(e.data?.message || "Gagal", "error"); }
   }
 
   const cols = [
-    { key: "vehicle", label: "Kendaraan", render: (r) => r.vehicle ? `${r.vehicle.name} (${r.vehicle.plate_number})` : "—" },
-    { key: "driver", label: "Driver", render: (r) => r.driver?.name || "—" },
     { key: "request", label: "Tujuan", render: (r) => r.request?.purpose || "—" },
-    { key: "assigned_at", label: "Tanggal Mulai", render: (r) => r.assigned_at ? new Date(r.assigned_at).toLocaleDateString("id-ID") : "—" },
+    { key: "driver", label: "Driver", render: (r) => r.driver?.name || "—" },
+    { key: "assigned_by", label: "Di-assign Oleh", render: (r) => r.assigned_by?.name || "—" },
     { key: "status", label: "Status", render: (r) => <Badge label={r.status} /> },
     {
       key: "actions", label: "Aksi",
       render: (r) => (
         <div style={{ display: "flex", gap: 6 }}>
-          {isAdminOrGA(user) && r.status === "Active" && (
-            <>
-              <Btn variant="success" style={{ padding: "5px 12px", fontSize: 12 }} onClick={(e) => { e.stopPropagation(); returnVehicle(r); }}>Kembalikan</Btn>
-              <Btn variant="danger" style={{ padding: "5px 12px", fontSize: 12 }} onClick={(e) => { e.stopPropagation(); cancel(r); }}>Batal</Btn>
-            </>
+          <Btn variant="ghost" style={{ padding: "5px 12px", fontSize: 12 }} onClick={(e) => { e.stopPropagation(); setModal({ mode: "view", data: r }); }}>Detail</Btn>
+          {(user.id === r.driver?.id && r.status === "pending_driver") && (
+            <Btn variant="primary" style={{ padding: "5px 12px", fontSize: 12 }} onClick={(e) => { e.stopPropagation(); openRespond(r); }}>Respon</Btn>
+          )}
+          {isAdmin(user) && r.status === "pending_driver" && (
+            <Btn variant="danger" style={{ padding: "5px 12px", fontSize: 12 }} onClick={(e) => { e.stopPropagation(); cancel(r); }}>Hapus</Btn>
           )}
         </div>
       ),
@@ -768,13 +988,13 @@ function AssignmentsPage() {
   return (
     <Section
       title="Penugasan Kendaraan"
-      actions={isAdminOrGA(user) && [<Btn key="add" onClick={openCreate}>+ Buat Assignment</Btn>]}
+      actions={isAdminOrGA(user) && [<Btn key="add" onClick={openCreate}>+ Tugaskan Driver</Btn>]}
     >
       <Card style={{ marginBottom: 16 }}>
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
           <Select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} style={{ ...inputStyle, width: 180 }}>
             <option value="">Semua Status</option>
-            {["Active", "Completed", "Cancelled"].map((s) => <option key={s}>{s}</option>)}
+            {["pending_driver", "accepted", "rejected"].map((s) => <option key={s}>{s}</option>)}
           </Select>
           <Btn variant="ghost" onClick={() => load(1)}>Filter</Btn>
         </div>
@@ -786,34 +1006,95 @@ function AssignmentsPage() {
       </Card>
 
       {modal?.mode === "create" && (
-        <Modal title="Buat Assignment Kendaraan" onClose={() => setModal(null)}>
+        <Modal title="Tugaskan Driver" onClose={() => setModal(null)}>
           <Field label="Request yang Disetujui">
             <Select value={form.request_id || ""} onChange={set("request_id")}>
               <option value="">-- Pilih Request --</option>
-              {approvedRequests.map((r) => <option key={r.id} value={r.id}>{r.purpose} — {r.requested_by?.name}</option>)}
+              {approvedRequests.map((r) => <option key={r.id} value={r.id}>{r.purpose}</option>)}
             </Select>
           </Field>
-          <Field label="Kendaraan Tersedia">
-            <Select value={form.vehicle_id || ""} onChange={set("vehicle_id")}>
-              <option value="">-- Pilih Kendaraan --</option>
-              {availableVehicles.map((v) => <option key={v.id} value={v.id}>{v.name} — {v.plate_number}</option>)}
-            </Select>
-          </Field>
-          <Field label="Driver">
+          <Field label="Pilih Driver">
             <Select value={form.driver_id || ""} onChange={set("driver_id")}>
               <option value="">-- Pilih Driver --</option>
               {drivers.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
             </Select>
           </Field>
-          <Field label="Tanggal Mulai">
-            <Input type="datetime-local" value={form.assigned_at || ""} onChange={set("assigned_at")} />
-          </Field>
-          <Field label="Catatan">
-            <Textarea value={form.notes || ""} onChange={set("notes")} placeholder="Catatan tambahan..." />
+          <Field label="Catatan Penugasan">
+            <Textarea value={form.notes || ""} onChange={set("notes")} placeholder="Instruksi untuk driver..." />
           </Field>
           <Btn onClick={create} disabled={loading} style={{ width: "100%", marginTop: 8 }}>
             {loading ? "Menyimpan..." : "Buat Assignment"}
           </Btn>
+        </Modal>
+      )}
+
+      {modal?.mode === "respond" && (
+        <Modal title="Respon Penugasan" onClose={() => setModal(null)}>
+          <p style={{ marginBottom: 16, fontSize: 14, color: "var(--muted)" }}>Tujuan: {modal.data.request?.purpose}</p>
+          <Field label="Pilihan Kendaraan (Jika Terima)">
+            <Select value={form.vehicle_id || ""} onChange={set("vehicle_id")}>
+              <option value="">-- Pilih Kendaraan --</option>
+              {availableVehicles.map((v) => <option key={v.id} value={v.id}>{v.name} — {v.plate_number}</option>)}
+            </Select>
+          </Field>
+          <Field label="Alasan Penolakan (Jika Tolak)">
+            <Textarea value={form.reject_reason || ""} onChange={set("reject_reason")} placeholder="Tidak enak badan..." />
+          </Field>
+          
+          <div style={{ display: "flex", gap: 12, marginTop: 16 }}>
+            <Btn variant="success" onClick={() => respondToAssignment("accepted")} disabled={loading} style={{ flex: 1 }}>
+              Terima Tugas
+            </Btn>
+            <Btn variant="danger" onClick={() => respondToAssignment("rejected")} disabled={loading} style={{ flex: 1 }}>
+              Tolak Tugas
+            </Btn>
+          </div>
+        </Modal>
+      )}
+
+      {modal?.mode === "view" && (
+        <Modal title="Detail Penugasan" onClose={() => setModal(null)}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {[
+              ["Tujuan / Keperluan", modal.data.request?.purpose || "—"],
+              ["Driver", modal.data.driver?.name || "—"],
+              ["Email Driver", modal.data.driver?.email || "—"],
+              ["Di-assign Oleh", modal.data.assigned_by?.name || "—"],
+              ["Waktu Assign", modal.data.assigned_at ? new Date(modal.data.assigned_at).toLocaleString("id-ID") : "—"],
+              ["Status Penugasan", modal.data.status],
+              ["Catatan Penugasan", modal.data.notes || "—"],
+              ["Alasan Ditolak", modal.data.reject_reason || "—"],
+            ].map(([k, v]) => (
+              <div key={k} style={{ display: "flex", justifyContent: "space-between", borderBottom: "1px solid var(--border)", paddingBottom: 8, gap: 12 }}>
+                <span style={{ color: "var(--muted)", fontSize: 13, flexShrink: 0 }}>{k}</span>
+                <span style={{ fontWeight: 600, color: "var(--text)", fontSize: 13, textAlign: "right" }}>
+                  {k === "Status Penugasan" ? <Badge label={v} /> : v || "—"}
+                </span>
+              </div>
+            ))}
+          </div>
+
+          {modal.data.vehicle && (
+            <div style={{ marginTop: 20, padding: 16, background: "var(--hover)", borderRadius: 12, border: "1px solid var(--border)" }}>
+              <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 10, color: "var(--text)" }}>🚗 Informasi Kendaraan</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {[
+                  ["Nama Kendaraan", modal.data.vehicle.name],
+                  ["Plat Nomor", modal.data.vehicle.plate_number],
+                  ["Tipe Kendaraan", modal.data.vehicle.type],
+                ].map(([k, v]) => (
+                  <div key={k} style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
+                    <span style={{ color: "var(--muted)" }}>{k}</span>
+                    <span style={{ fontWeight: 600, color: "var(--text)" }}>{v || "—"}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {user.id === modal.data.driver?.id && modal.data.status === "pending_driver" && (
+            <Btn variant="primary" style={{ width: "100%", marginTop: 20 }} onClick={() => openRespond(modal.data)}>Respon Penugasan</Btn>
+          )}
         </Modal>
       )}
     </Section>
@@ -838,7 +1119,13 @@ function UsersPage() {
     } catch { toast("Gagal memuat users", "error"); }
   }, [token, toast]);
 
-  useEffect(() => { load(page); }, [load, page]);
+  useEffect(() => {
+    let active = true;
+    Promise.resolve().then(() => {
+      if (active) load(page);
+    });
+    return () => { active = false; };
+  }, [load, page]);
 
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
@@ -878,7 +1165,7 @@ function UsersPage() {
       render: (r) => (
         <div style={{ display: "flex", gap: 6 }}>
           <Btn variant="ghost" style={{ padding: "5px 12px", fontSize: 12 }}
-            onClick={(e) => { e.stopPropagation(); setForm({ ...r, role: r.roles?.[0] }); setModal({ mode: "edit", data: r }); }}>Edit</Btn>
+            onClick={(e) => { e.stopPropagation(); setForm({ ...r, role: r.roles?.[0], is_department_head: r.is_department_head ?? false, department_id: r.department_id ?? "" }); setModal({ mode: "edit", data: r }); }}>Edit</Btn>
           <Btn variant="danger" style={{ padding: "5px 12px", fontSize: 12 }}
             onClick={(e) => { e.stopPropagation(); destroy(r); }}>Hapus</Btn>
         </div>
@@ -889,7 +1176,7 @@ function UsersPage() {
   return (
     <Section
       title="Manajemen User"
-      actions={[<Btn key="add" onClick={() => { setForm({ role: "Employee" }); setModal({ mode: "create" }); }}>+ Tambah User</Btn>]}
+      actions={[<Btn key="add" onClick={() => { setForm({ role: "Employee", is_department_head: false, department_id: "" }); setModal({ mode: "create" }); }}>+ Tambah User</Btn>]}
     >
       <Card>
         <Table cols={cols} rows={users} />
@@ -907,11 +1194,105 @@ function UsersPage() {
             </>
           )}
           <Field label="Role">
-            <Select value={form.role || "Employee"} onChange={set("role")}>
+            <Select value={form.role || "Employee"} onChange={(e) => setForm(f => ({ ...f, role: e.target.value, rank: "", department_id: "", is_department_head: false }))}>
               {["Admin", "GA", "Approver", "Employee", "Driver"].map((r) => <option key={r}>{r}</option>)}
             </Select>
           </Field>
-          <Btn onClick={save} disabled={loading} style={{ width: "100%", marginTop: 8 }}>
+          {/* Rank — wajib untuk Approver */}
+          {form.role === "Approver" && (
+            <Field label="Jabatan / Rank *">
+              <Input
+                value={form.rank || ""}
+                onChange={set("rank")}
+                placeholder="Contoh: Manager, Supervisor, Kepala Bagian"
+              />
+            </Field>
+          )}
+
+          {/* Departemen — tampil untuk Approver dan GA */}
+          {(form.role === "Approver" || form.role === "GA") && (
+            <Field label="Departemen">
+              <Select
+                value={form.department_id || ""}
+                onChange={set("department_id")}
+                style={{
+                  ...inputStyle,
+                  borderColor: form.is_department_head && !form.department_id ? "#f59e0b" : undefined,
+                  transition: "border-color 0.2s",
+                }}
+              >
+                <option value="">-- Pilih Departemen --</option>
+                {[
+                  { value: "IT",         label: "IT" },
+                  { value: "FA",         label: "FA" },
+                  { value: "HR&GA",      label: "HRD & GA" },
+                  { value: "PRODUCTION", label: "Produksi" },
+                  { value: "QC",         label: "QC" },
+                  { value: "QA",         label: "QA" },
+                ].map((d) => (
+                  <option key={d.value} value={d.value}>{d.label}</option>
+                ))}
+              </Select>
+            </Field>
+          )}
+
+          {/* Kepala Departemen — tampil untuk Approver dan GA */}
+          {(form.role === "Approver" || form.role === "GA") && (
+            <Field label="Kepala Departemen">
+              <label style={{
+                display: "flex", alignItems: "flex-start", gap: 10, cursor: "pointer",
+                padding: "10px 14px", borderRadius: 10,
+                background: form.is_department_head ? "#2563eb11" : "var(--input-bg)",
+                border: `1px solid ${form.is_department_head ? "var(--accent)" : "var(--border)"}`,
+                transition: "all 0.2s",
+              }}>
+                <input
+                  type="checkbox"
+                  checked={!!form.is_department_head}
+                  onChange={(e) => setForm(f => ({ ...f, is_department_head: e.target.checked }))}
+                  style={{ width: 16, height: 16, marginTop: 2, accentColor: "var(--accent)", cursor: "pointer", flexShrink: 0 }}
+                />
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>Jadikan Kepala Departemen</div>
+                  <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>User ini akan memiliki wewenang untuk menyetujui request dari departemennya</div>
+                </div>
+              </label>
+
+              {/* Warning: centang tapi belum pilih departemen */}
+              {form.is_department_head && !form.department_id && (
+                <div style={{
+                  marginTop: 8, padding: "8px 12px", borderRadius: 8,
+                  background: "#f59e0b22", border: "1px solid #f59e0b55",
+                  color: "#d97706", fontSize: 12, fontWeight: 600,
+                  display: "flex", alignItems: "center", gap: 6,
+                }}>
+                  <span>⚠️</span> Harap pilih departemen di atas sebelum menyimpan
+                </div>
+              )}
+
+              {/* Konfirmasi: sudah pilih departemen */}
+              {form.is_department_head && form.department_id && (
+                <div style={{
+                  marginTop: 8, padding: "8px 12px", borderRadius: 8,
+                  background: "#22c55e22", border: "1px solid #22c55e55",
+                  color: "#16a34a", fontSize: 12, fontWeight: 600,
+                  display: "flex", alignItems: "center", gap: 6,
+                }}>
+                  <span>✓</span> Akan dijadikan Kepala — {[
+                    { value: "IT", label: "IT" }, { value: "FA", label: "FA" },
+                    { value: "HR&GA", label: "HRD & GA" }, { value: "PRODUCTION", label: "Produksi" },
+                    { value: "QC", label: "QC" }, { value: "QA", label: "QA" },
+                  ].find(d => d.value === form.department_id)?.label || form.department_id}
+                </div>
+              )}
+            </Field>
+          )}
+
+          <Btn
+            onClick={save}
+            disabled={loading || (form.is_department_head && !form.department_id)}
+            style={{ width: "100%", marginTop: 8 }}
+          >
             {loading ? "Menyimpan..." : "Simpan"}
           </Btn>
         </Modal>
@@ -936,7 +1317,13 @@ function AuditLogsPage() {
     } catch { toast("Gagal memuat audit log", "error"); }
   }, [token, user, toast]);
 
-  useEffect(() => { load(page); }, [load, page]);
+  useEffect(() => {
+    let active = true;
+    Promise.resolve().then(() => {
+      if (active) load(page);
+    });
+    return () => { active = false; };
+  }, [load, page]);
 
   const cols = [
     { key: "action", label: "Aksi", render: (r) => <span style={{ fontWeight: 600 }}>{r.action}</span> },
@@ -959,10 +1346,10 @@ function AuditLogsPage() {
 // ─── SIDEBAR NAV ──────────────────────────────────────────────────────────────
 const NAV_ITEMS = [
   { id: "dashboard", label: "Dashboard", icon: "🏠" },
-  { id: "vehicles", label: "Kendaraan", icon: "🚗" },
+  { id: "vehicles", label: "Kendaraan", icon: "🚗", roles: ["Admin", "GA"] },
   { id: "requests", label: "Permintaan", icon: "📋" },
-  { id: "assignments", label: "Penugasan", icon: "🔑" },
-  { id: "users", label: "Users", icon: "👥", adminOnly: true },
+  { id: "assignments", label: "Penugasan", icon: "🔑", roles: ["Admin", "GA", "Driver"] },
+  { id: "users", label: "Users", icon: "👥", roles: ["Admin"] },
   { id: "audit", label: "Audit Log", icon: "📜" },
 ];
 
@@ -989,7 +1376,7 @@ function Sidebar({ page, setPage, user, onLogout, collapsed, setCollapsed }) {
 
       {/* Nav */}
       <nav style={{ flex: 1, padding: "12px 8px", overflowY: "auto" }}>
-        {NAV_ITEMS.filter((n) => !n.adminOnly || isAdmin(user)).map((n) => (
+        {NAV_ITEMS.filter((n) => !n.roles || n.roles.some(r => user?.roles?.includes(r))).map((n) => (
           <button key={n.id} onClick={() => setPage(n.id)} style={{
             display: "flex", alignItems: "center", gap: 12,
             width: "100%", padding: "10px 12px", border: "none", borderRadius: 10,
@@ -1032,9 +1419,9 @@ function Sidebar({ page, setPage, user, onLogout, collapsed, setCollapsed }) {
 // ─── APP ROOT ─────────────────────────────────────────────────────────────────
 export default function App() {
   const [authUser, setAuthUser] = useState(() => {
-    try { return JSON.parse(localStorage.getItem("ovms_user") || "null"); } catch { return null; }
+    try { return JSON.parse(sessionStorage.getItem("ovms_user") || "null"); } catch { return null; }
   });
-  const [authToken, setAuthToken] = useState(() => localStorage.getItem("ovms_token") || "");
+  const [authToken, setAuthToken] = useState(() => sessionStorage.getItem("ovms_token") || "");
   const [page, setPage] = useState("dashboard");
   const [toasts, setToasts] = useState([]);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -1049,16 +1436,16 @@ export default function App() {
   function handleLogin(user, token) {
     setAuthUser(user);
     setAuthToken(token);
-    localStorage.setItem("ovms_user", JSON.stringify(user));
-    localStorage.setItem("ovms_token", token);
+    sessionStorage.setItem("ovms_user", JSON.stringify(user));
+    sessionStorage.setItem("ovms_token", token);
     setPage("dashboard");
   }
 
   async function handleLogout() {
-    try { await api("POST", "/logout", null, authToken); } catch {}
+    try { await api("POST", "/logout", null, authToken); } catch (e) { console.error(e); }
     setAuthUser(null); setAuthToken("");
-    localStorage.removeItem("ovms_user");
-    localStorage.removeItem("ovms_token");
+    sessionStorage.removeItem("ovms_user");
+    sessionStorage.removeItem("ovms_token");
   }
 
   function toggleDark() {
