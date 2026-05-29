@@ -103,9 +103,10 @@ async function run() {
         destination_city: "Jakarta",
         destination_place: "Kantor Pusat Sudirman",
         passenger_count: 2,
-        priority: "normal",
+        priority: "Normal",
         start_time: new Date(Date.now() + 3600000).toISOString().slice(0, 16),
         end_time: new Date(Date.now() + 86400000).toISOString().slice(0, 16),
+        passengers: [{ name: "Passenger 1", department_id: "IT" }, { name: "Passenger 2", department_id: "IT" }]
     }, employeeToken || adminToken);
     requestId = res.data.data ? res.data.data.id : res.data.id;
     console.log("✅ POST /requests OK, id:", requestId);

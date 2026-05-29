@@ -48,10 +48,10 @@ const STATUS_COLORS = {
   pending_driver: "#f59e0b",
   accepted: "#22c55e",
   rejected_driver: "#ef4444",
-  // Priority
-  normal: "#6b7280",
-  urgent: "#f59e0b",
-  critical: "#ef4444",
+  // Priority (capitalized)
+  Normal: "#6b7280",
+  Urgent: "#f59e0b",
+  Critical: "#ef4444",
 };
 
 const STATUS_LABELS = {
@@ -68,10 +68,10 @@ const STATUS_LABELS = {
   completed: "Selesai",
   pending_driver: "Menunggu Driver",
   accepted: "Driver Menerima",
-  // Priority labels
-  normal: "Normal",
-  urgent: "Urgent",
-  critical: "Critical",
+  // Priority labels (capitalized)
+  Normal: "Normal",
+  Urgent: "Urgent",
+  Critical: "Critical",
 };
 function Badge({ label }) {
   const color = STATUS_COLORS[label] || "#6b7280";
@@ -274,7 +274,8 @@ function LoginPage({ onLogin }) {
         onLogin(res.data.user, res.data.token);
       } else {
         const res = await api("POST", "/register", form);
-        onLogin(res.data.user, res.data.token);
+        setTab("login");
+        setErr("Pendaftaran berhasil! Silakan masuk dengan akun Anda.");
       }
     } catch (e) {
       setErr(e.data?.message || JSON.stringify(e.data?.errors || "Error"));
@@ -575,12 +576,39 @@ function RequestsPage() {
     return () => { active = false; };
   }, [load, page]);
 
-  const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
+
+  const set = (k) => (e) => {
+    const value = e && e.target ? e.target.value : e;
+    setForm((f) => {
+      const next = { ...f, [k]: value };
+      // when passenger_count changes, ensure passengers array length matches
+      if (k === 'passenger_count') {
+        const count = parseInt(value) || 0;
+        const existing = Array.isArray(f.passengers) ? f.passengers : [];
+        const passengers = Array.from({ length: count }, (_, i) => existing[i] ? existing[i] : { name: '', department_id: '' });
+        next.passengers = passengers;
+      }
+      return next;
+    });
+  };
+
+  const setPassenger = (idx, field) => (e) => {
+    const value = e && e.target ? e.target.value : e;
+    setForm((f) => {
+      const passengers = Array.isArray(f.passengers) ? [...f.passengers] : [];
+      passengers[idx] = { ...(passengers[idx] || { name: '', department_id: '' }), [field]: value };
+      return { ...f, passengers };
+    });
+  };
 
   async function create() {
     setLoading(true);
     try {
-      await api("POST", "/requests", form, token);
+      const payload = { ...form };
+      payload.passenger_count = Number(form.passenger_count) || (Array.isArray(form.passengers) ? form.passengers.length : 0);
+      // ensure passengers is sent as array (can be empty)
+      if (!Array.isArray(payload.passengers)) payload.passengers = [];
+      await api("POST", "/requests", payload, token);
       toast("Permintaan berhasil diajukan");
       setModal(null); load(page);
     } catch (e) {
@@ -669,7 +697,7 @@ function RequestsPage() {
     <Section
       title="Permintaan Kendaraan"
       actions={[
-        <Btn key="create" onClick={() => { setForm({}); setModal({ mode: "create" }); }}>+ Buat Request</Btn>
+        <Btn key="create" onClick={() => { setForm({ passenger_count: 1, passengers: [{ name: '', department_id: '' }] }); setModal({ mode: "create" }); }}>+ Buat Request</Btn>
       ]}
     >
       <Card style={{ marginBottom: 16 }}>
@@ -717,18 +745,43 @@ function RequestsPage() {
             <Textarea value={form.purpose || ""} onChange={set("purpose")} placeholder="Meting dengan klien..." />
           </Field>
           
-          <div style={{ display: "flex", gap: 12 }}>
-            <div style={{ flex: 1 }}>
-              <Field label="Jml Penumpang">
-                <Input type="number" value={form.passenger_count || ""} onChange={set("passenger_count")} placeholder="1" />
+          <Field label="Jml Penumpang">
+            <Input
+              type="number"
+              value={form.passenger_count || ""}
+              onChange={set("passenger_count")}
+              placeholder="1"
+              min="1"
+            />
+          </Field>
+
+          {Array.from({ length: form.passenger_count || 0 }).map((_, idx) => (
+            <div key={idx} style={{ marginTop: 15, padding: 15, background: "var(--bg-card)", borderRadius: 8, border: "1px solid var(--border)" }}>
+              <div style={{ fontWeight: 600, marginBottom: 10, color: "var(--text)" }}>Penumpang {idx + 1}</div>
+              <Field label="Nama Penumpang">
+                <Input
+                  value={form.passengers?.[idx]?.name || ""}
+                  onChange={setPassenger(idx, "name")}
+                  placeholder="Nama lengkap"
+                />
+              </Field>
+              <Field label="Departemen Penumpang (Opsional)">
+                <Input
+                  value={form.passengers?.[idx]?.department_id || ""}
+                  onChange={setPassenger(idx, "department_id")}
+                  placeholder="Contoh: IT, FA"
+                />
               </Field>
             </div>
+          ))}
+
+          <div style={{ display: "flex", gap: 12 }}>
             <div style={{ flex: 1 }}>
               <Field label="Prioritas">
-                <Select value={form.priority || "normal"} onChange={set("priority")}>
-                  <option value="normal">Normal</option>
-                  <option value="urgent">Urgent</option>
-                  <option value="critical">Critical</option>
+                <Select value={form.priority || "Normal"} onChange={set("priority")}>
+                  <option value="Normal">Normal</option>
+                  <option value="Urgent">Urgent</option>
+                  <option value="Critical">Critical</option>
                 </Select>
               </Field>
             </div>
@@ -772,6 +825,18 @@ function RequestsPage() {
                 </span>
               </div>
             ))}
+
+            {modal.data.passengers?.length > 0 && (
+              <div style={{ marginTop: 20, padding: 16, background: "var(--hover)", borderRadius: 12, border: "1px solid var(--border)" }}>
+                <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 10, color: "var(--text)" }}>👥 Daftar Penumpang</div>
+                {modal.data.passengers.map((p, idx) => (
+                  <div key={idx} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 5 }}>
+                    <span style={{ color: "var(--muted)" }}>{p.name}</span>
+                    <span style={{ fontWeight: 600, color: "var(--text)" }}>{p.department_id || "—"}</span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           {/* Approval History */}
@@ -1129,17 +1194,26 @@ function UsersPage() {
 
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
-  async function save() {
-    setLoading(true);
-    try {
-      if (modal.mode === "create") {
-        await api("POST", "/users", form, token);
-        toast("User berhasil dibuat");
-      } else {
-        await api("PUT", `/users/${modal.data.id}`, form, token);
-        toast("User berhasil diperbarui");
+async function save() {
+  setLoading(true);
+  try {
+    if (modal.mode === "create") {
+      // Validasi password cocok di sisi client
+      if (form.password !== form.password_confirmation) {
+        toast("Password dan konfirmasi password tidak cocok", "error");
+        setLoading(false);
+        return;
       }
-      setModal(null); load(page);
+  // Hapus password_confirmation sebelum kirim ke API
+  const { password_confirmation, ...payload } = form;
+    await api("POST", "/users", payload, token);   // ← payload bersih
+    toast("User berhasil dibuat");
+  } else {
+    await api("PUT", `/users/${modal.data.id}`, form, token);
+    toast("User berhasil diperbarui");
+  }
+
+  setModal(null); load(page);
     } catch (e) {
       toast(e.data?.message || JSON.stringify(e.data?.errors || "Error"), "error");
     } finally { setLoading(false); }
